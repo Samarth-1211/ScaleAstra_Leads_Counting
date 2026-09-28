@@ -10,3 +10,10 @@ export function normalizePhone(raw: string): string {
 }
 
 export const isValidEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+/**
+ * Business names match regardless of case, spacing and punctuation:
+ * "ABC Builders Pvt. Ltd." and "abc builders pvt ltd" both become "abcbuilderspvtltd".
+ * Mirrors normalizeBusiness_ in Code.gs.
+ */
+export const normalizeBusiness = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu, '');

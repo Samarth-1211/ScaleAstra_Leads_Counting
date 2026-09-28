@@ -1,6 +1,17 @@
 import { useEffect, useState, type ChangeEvent, type ComponentProps, type FormEvent, type ReactNode } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, checkPhone, saveLead, statsQuery, type LeadInput } from '../api';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  ApiError,
+  duplicateCheckQuery,
+  duplicateLookup,
+  hasLookup,
+  saveLead,
+  statsQuery,
+  type Duplicate,
+  type DuplicateField,
+  type DuplicateLookup,
+  type LeadInput,
+} from '../api';
 import { BUSINESS_TYPES, CONFIG, DESIGNATIONS, LEAD_SOURCES, isConfigured } from '../config';
 import { isValidEmail, normalizePhone } from '../phone';
 
@@ -20,6 +31,21 @@ type FormState = {
 type Errors = Partial<Record<keyof FormState, string>>;
 
 const ADDED_BY_KEY = 'scalehour.addedBy';
+
+/** Wait this long after typing stops before searching the sheet. */
+const CHECK_DELAY_MS = 500;
+
+const DUPLICATE_ERRORS: Record<DuplicateField, string> = {
+  business: 'A lead with this business name is already in the sheet.',
+  email: 'This email is already in the sheet.',
+  phone: 'This number is already in the sheet.',
+};
+
+const DUPLICATE_LABELS: Record<DuplicateField, string> = {
+  business: 'business name',
+  email: 'email',
+  phone: 'phone number',
+};
 
 function savedName() {
   try {
@@ -44,7 +70,9 @@ const emptyForm = (addedBy: string): FormState => ({
   leadSourceOther: '',
 });
 
-/** Returns errors in the same order as the fields, so the first one gets focus. */
+/** Fields top to bottom, so the first one with an error gets focus. */
+const FIELD_ORDER = Object.keys(emptyForm('')) as (keyof FormState)[];
+
 function validate(f: FormState): Errors {
   const e: Errors = {};
   if (!f.addedBy) e.addedBy = 'Select your name.';
@@ -58,6 +86,37 @@ function validate(f: FormState): Errors {
   if (!f.leadSource) e.leadSource = 'Select where this lead came from.';
   else if (f.leadSource === 'Other' && !f.leadSourceOther.trim()) e.leadSourceOther = 'Type the lead source.';
   return e;
+}
+
+/**
+ * Keeps only the matches whose fields still hold the value that was searched for,
+ * so an earlier result never flags a field that has since been changed.
+ */
+function stillMatching(
+  result: { lookup: DuplicateLookup; duplicates: Duplicate[] } | undefined,
+  current: DuplicateLookup,
+): Duplicate[] {
+  if (!result) return [];
+  return result.duplicates
+    .map((d) => ({ ...d, matchedOn: d.matchedOn.filter((f) => current[f] && current[f] === result.lookup[f]) }))
+    .filter((d) => d.matchedOn.length > 0);
+}
+
+function duplicateErrors(duplicates: Duplicate[]): Errors {
+  const e: Errors = {};
+  for (const d of duplicates) for (const f of d.matchedOn) e[f] = DUPLICATE_ERRORS[f];
+  return e;
+}
+
+function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value);
+  // `value` is a new object on every render, so its JSON decides when it really changed.
+  const key = JSON.stringify(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), ms);
+    return () => clearTimeout(timer);
+  }, [key, ms]);
+  return debounced;
 }
 
 function toLead(f: FormState): LeadInput {
@@ -82,32 +141,47 @@ export function LeadForm() {
   const [success, setSuccess] = useState('');
   const [failure, setFailure] = useState('');
 
-  // Check for an existing lead as soon as a full, valid number is typed.
-  const phoneDigits = normalizePhone(form.phone);
-  const phoneCheck = useQuery({
-    queryKey: ['phone-check', phoneDigits],
-    queryFn: () => checkPhone(phoneDigits),
-    enabled: isConfigured() && !!phoneDigits,
-    staleTime: 60_000,
-    retry: false,
+  // Search the sheet for the business name, email and phone once typing pauses.
+  const currentLookup = duplicateLookup(form);
+  const lookup = useDebounced(currentLookup, CHECK_DELAY_MS);
+  const check = useQuery({
+    ...duplicateCheckQuery(lookup),
+    enabled: isConfigured() && hasLookup(lookup),
+    // Keep showing the last result while the next search runs, instead of flickering.
+    placeholderData: keepPreviousData,
   });
-  const duplicate = phoneDigits ? (phoneCheck.data?.duplicate ?? null) : null;
+  const duplicates = stillMatching(check.data, currentLookup);
 
+  const [stage, setStage] = useState<'checking' | 'saving'>('checking');
   const save = useMutation({
-    mutationFn: saveLead,
+    // Step 1: make sure nothing matches. Step 2: save. The server checks again while
+    // saving, so two people adding the same lead at the same moment can't both succeed.
+    mutationFn: async (lead: LeadInput) => {
+      setStage('checking');
+      const found = await queryClient.fetchQuery(duplicateCheckQuery(duplicateLookup(lead)));
+      if (found.duplicates.length) {
+        throw new ApiError('duplicate', 'Already in the sheet.', found.duplicates);
+      }
+      setStage('saving');
+      return saveLead(lead);
+    },
     // Try even when offline, so the caller gets an error now instead of a save that silently waits.
     networkMode: 'always',
     onSuccess: (result, lead) => {
       queryClient.setQueryData(statsQuery.queryKey, result);
-      queryClient.removeQueries({ queryKey: ['phone-check'] });
+      queryClient.removeQueries({ queryKey: ['duplicate-check'] });
       setForm(emptyForm(lead.addedBy));
       setErrors({});
       setSuccess(`Saved ${result.leadId} · ${lead.business}`);
     },
     onError: (err, lead) => {
-      if (err instanceof ApiError && err.code === 'duplicate' && err.duplicate) {
-        queryClient.setQueryData(['phone-check', lead.phone], { duplicate: err.duplicate });
-        setErrors({ phone: 'This number is already in the sheet.' });
+      if (err instanceof ApiError && err.code === 'duplicate' && err.duplicates?.length) {
+        const searched = duplicateLookup(lead);
+        queryClient.setQueryData(duplicateCheckQuery(searched).queryKey, { lookup: searched, duplicates: err.duplicates });
+        const found = duplicateErrors(err.duplicates);
+        setErrors(found);
+        const first = FIELD_ORDER.find((k) => found[k]);
+        if (first) document.getElementById(first)?.focus();
       } else {
         setFailure(`${err.message} Your details are still here. Tap “Save lead” to try again.`);
       }
@@ -150,11 +224,11 @@ export function LeadForm() {
     setSuccess('');
     setFailure('');
 
-    const found = validate(form);
-    if (!found.phone && duplicate) found.phone = 'This number is already in the sheet.';
+    // A format problem wins over "already in the sheet" for the same field.
+    const found = { ...duplicateErrors(duplicates), ...validate(form) };
     setErrors(found);
 
-    const firstInvalid = Object.keys(found)[0];
+    const firstInvalid = FIELD_ORDER.find((k) => found[k]);
     if (firstInvalid) {
       document.getElementById(firstInvalid)?.focus();
       return;
@@ -193,13 +267,7 @@ export function LeadForm() {
           </div>
 
           <div className="row-2">
-            <Field
-              id="phone"
-              label="Phone number"
-              required
-              error={errors.phone}
-              hint={phoneCheck.isFetching ? 'Checking the sheet…' : '10-digit mobile, +91 optional'}
-            >
+            <Field id="phone" label="Phone number" required error={errors.phone} hint="10-digit mobile, +91 optional">
               <input {...field('phone')} type="tel" inputMode="tel" autoComplete="off" placeholder="98765 43210" />
             </Field>
             <Field id="email" label="Email" error={errors.email}>
@@ -207,13 +275,20 @@ export function LeadForm() {
             </Field>
           </div>
 
-          {duplicate && (
+          {check.isFetching && !save.isPending && <Progress label="Searching the sheet for duplicates…" />}
+          {check.isError && !check.isFetching && !save.isPending && (
+            <p className="field-hint">Couldn’t search for duplicates right now. It will be checked again when you save.</p>
+          )}
+
+          {duplicates.length > 0 && (
             <div className="notice notice-error" role="alert">
               <strong>Already in the sheet, so it won't be added again</strong>
-              <span>
-                Added by {duplicate.addedBy} on {duplicate.dateAdded}
-                {duplicate.business ? ` · ${duplicate.business}` : ''} ({duplicate.leadId})
-              </span>
+              {duplicates.map((d) => (
+                <span key={d.leadId}>
+                  Same {d.matchedOn.map((f) => DUPLICATE_LABELS[f]).join(', ')} as {d.leadId}
+                  {d.business ? ` · ${d.business}` : ''}, added by {d.addedBy} on {d.dateAdded}
+                </span>
+              ))}
             </div>
           )}
 
@@ -242,6 +317,15 @@ export function LeadForm() {
           )}
         </fieldset>
 
+        {save.isPending && (
+          <Progress
+            label={
+              stage === 'checking'
+                ? 'Step 1 of 2 · Searching the sheet for duplicates…'
+                : 'Step 2 of 2 · No duplicates found. Saving the lead…'
+            }
+          />
+        )}
         {failure && (
           <div className="notice notice-error" role="alert">
             <strong>Not saved</strong>
@@ -258,7 +342,7 @@ export function LeadForm() {
         <button type="submit" className="btn btn-primary btn-block" disabled={save.isPending}>
           {save.isPending ? (
             <>
-              <span className="spinner" aria-hidden="true" /> Saving…
+              <span className="spinner" aria-hidden="true" /> {stage === 'checking' ? 'Checking…' : 'Saving…'}
             </>
           ) : (
             'Save lead'
@@ -266,6 +350,18 @@ export function LeadForm() {
         </button>
       </form>
     </section>
+  );
+}
+
+/** A search can't report how far along it is, so the bar keeps moving until it's done. */
+function Progress({ label }: { label: string }) {
+  return (
+    <div className="progress" role="status">
+      <div className="progress-track" aria-hidden="true">
+        <span />
+      </div>
+      <p className="progress-label">{label}</p>
+    </div>
   );
 }
 

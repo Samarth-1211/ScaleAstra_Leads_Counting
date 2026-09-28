@@ -648,6 +648,53 @@ fieldset .notice {
   color: var(--ink-soft);
 }
 
+/* ---------- Progress bar ---------- */
+
+.progress {
+  display: grid;
+  gap: 6px;
+  animation: fade-in 0.2s ease-out;
+}
+
+.lead-form > .progress {
+  margin-bottom: 16px;
+}
+
+.progress-track {
+  position: relative;
+  height: 6px;
+  background: var(--line-soft);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-track span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: var(--ink);
+  border-radius: 3px;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+.progress-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
 /* ---------- Misc ---------- */
 
 .not-found {
@@ -670,5 +717,11 @@ fieldset .notice {
 
   .splash-timer {
     display: none;
+  }
+
+  /* No sliding: show a steady, lighter full-width bar instead. */
+  .progress-track span {
+    width: 100%;
+    opacity: 0.45;
   }
 }
