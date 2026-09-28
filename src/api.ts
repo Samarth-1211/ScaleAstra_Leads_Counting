@@ -1,6 +1,6 @@
 import { queryOptions } from '@tanstack/react-query';
 import { CONFIG, isConfigured } from './config';
-import { isValidEmail, normalizeBusiness, normalizePhone } from './phone';
+import { isValidEmail, normalizeAnyPhone, normalizeBusiness } from './phone';
 
 export type Stats = {
   today: string;
@@ -19,10 +19,12 @@ export type Duplicate = {
   dateAdded: string;
   /** Which of the new lead's fields this existing row matched. */
   matchedOn: DuplicateField[];
+  /** Which of the searched numbers this row has (10 digits each). */
+  phones?: string[];
 };
 
-/** Normalized values to look up; an empty string means "don't check this field". */
-export type DuplicateLookup = Record<DuplicateField, string>;
+/** Normalized values to look up; an empty string or list means "don't check this field". */
+export type DuplicateLookup = { business: string; email: string; phones: string[] };
 
 export type LeadInput = {
   addedBy: string;
@@ -30,11 +32,18 @@ export type LeadInput = {
   contactName: string;
   designation: string;
   phone: string;
+  otherPhones: string[];
   email: string;
   website: string;
+  websitePitch: string;
+  websiteNotes: string;
   city: string;
+  area: string;
   businessType: string;
   leadSource: string;
+  listingLink: string;
+  socialLink: string;
+  notes: string;
 };
 
 export class ApiError extends Error {
@@ -96,27 +105,31 @@ function getUrl(params: Record<string, string>) {
 export const fetchStats = () => request<Stats>(getUrl({}));
 
 /** Only fields that are complete enough to compare are looked up. */
-export function duplicateLookup(f: { business: string; email: string; phone: string }): DuplicateLookup {
+export function duplicateLookup(f: { business: string; email: string; phones: string[] }): DuplicateLookup {
   const business = normalizeBusiness(f.business);
   const email = f.email.trim().toLowerCase();
+  const phones = f.phones.map(normalizeAnyPhone).filter(Boolean);
   return {
     business: business.length >= 2 ? business : '',
     email: isValidEmail(email) ? email : '',
-    phone: normalizePhone(f.phone),
+    phones: [...new Set(phones)],
   };
 }
 
-export const hasLookup = (l: DuplicateLookup) => !!(l.business || l.email || l.phone);
+export const hasLookup = (l: DuplicateLookup) => !!(l.business || l.email || l.phones.length);
 
-const checkDuplicates = (lookup: DuplicateLookup) =>
-  request<{ duplicates: Duplicate[] }>(
-    getUrl({ action: 'check', ...Object.fromEntries(Object.entries(lookup).filter(([, v]) => v)) }),
-  );
+const checkDuplicates = ({ business, email, phones }: DuplicateLookup) => {
+  const params: Record<string, string> = { action: 'check' };
+  if (business) params.business = business;
+  if (email) params.email = email;
+  if (phones.length) params.phone = phones.join(',');
+  return request<{ duplicates: Duplicate[] }>(getUrl(params));
+};
 
 /** Returns the lookup alongside the result, so callers can tell which values it was for. */
 export const duplicateCheckQuery = (lookup: DuplicateLookup) =>
   queryOptions({
-    queryKey: ['duplicate-check', lookup.business, lookup.email, lookup.phone],
+    queryKey: ['duplicate-check', lookup.business, lookup.email, lookup.phones.join(',')],
     queryFn: async () => ({ lookup, duplicates: (await checkDuplicates(lookup)).duplicates }),
     staleTime: 20_000,
     retry: false,

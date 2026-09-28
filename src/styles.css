@@ -43,7 +43,8 @@ h2 {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: inherit;
 }
@@ -546,7 +547,8 @@ select {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   min-height: 52px;
   padding: 12px 14px;
@@ -565,33 +567,44 @@ select {
   cursor: pointer;
 }
 
+.field textarea {
+  min-height: 0;
+  line-height: 1.4;
+  resize: vertical;
+}
+
 .field select:has(option[value='']:checked) {
   color: var(--muted);
 }
 
-.field input::placeholder {
+.field input::placeholder,
+.field textarea::placeholder {
   color: #a3a3a3;
 }
 
 .field input:hover,
-.field select:hover {
+.field select:hover,
+.field textarea:hover {
   border-color: #a8a8a8;
 }
 
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   outline: none;
   border-color: var(--ink);
   box-shadow: 0 0 0 1px var(--ink);
 }
 
 .has-error input,
-.has-error select {
+.has-error select,
+.has-error textarea {
   border-color: var(--red);
 }
 
 .has-error input:focus,
-.has-error select:focus {
+.has-error select:focus,
+.has-error textarea:focus {
   border-color: var(--red);
   box-shadow: 0 0 0 1px var(--red);
 }
@@ -612,8 +625,51 @@ select {
 }
 
 fieldset:disabled input,
-fieldset:disabled select {
+fieldset:disabled select,
+fieldset:disabled textarea {
   background: var(--surface);
+  color: var(--muted);
+}
+
+/* Phone numbers: the main one, any extras, then the "add" button. */
+.phones {
+  display: grid;
+  gap: 12px;
+}
+
+.input-action {
+  display: flex;
+  gap: 8px;
+}
+
+.input-action input {
+  flex: 1;
+}
+
+.input-action .icon-btn {
+  flex: none;
+  width: 52px;
+  height: 52px;
+}
+
+.btn-add {
+  justify-self: start;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px dashed #a8a8a8;
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-add:hover:not(:disabled) {
+  border-color: var(--ink);
+}
+
+.btn-add:disabled {
+  cursor: default;
   color: var(--muted);
 }
 

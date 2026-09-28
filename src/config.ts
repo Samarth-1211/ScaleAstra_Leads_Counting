@@ -20,7 +20,18 @@ export const CONFIG = {
 
   /** How long the opening quote stays before the app continues, in seconds. */
   QUOTE_SECONDS: 5,
+
+  /** Most phone numbers one lead can have, counting the main one. */
+  MAX_PHONE_NUMBERS: 5,
 };
+
+/** Whether we can also pitch them a website, and roughly why. */
+export const WEBSITE_PITCH = [
+  'Yes – no website',
+  'Yes – website needs work',
+  'No – website is good',
+  'Not sure',
+];
 
 export const DESIGNATIONS = ['Founder', 'Director', 'Owner', 'Sales Head', 'Manager', 'Other'];
 

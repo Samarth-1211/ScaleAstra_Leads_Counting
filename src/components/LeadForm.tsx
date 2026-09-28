@@ -12,23 +12,36 @@ import {
   type DuplicateLookup,
   type LeadInput,
 } from '../api';
-import { BUSINESS_TYPES, CONFIG, DESIGNATIONS, LEAD_SOURCES, isConfigured } from '../config';
-import { isValidEmail, normalizePhone } from '../phone';
+import { BUSINESS_TYPES, CONFIG, DESIGNATIONS, LEAD_SOURCES, WEBSITE_PITCH, isConfigured } from '../config';
+import { formatPhone, isValidEmail, normalizeAnyPhone, normalizePhone } from '../phone';
 
 type FormState = {
   addedBy: string;
   business: string;
   contactName: string;
   designation: string;
-  phone: string;
+  /** The first is the main (mobile) number; the rest are optional extra numbers. */
+  phones: string[];
   email: string;
+  socialLink: string;
   website: string;
+  websitePitch: string;
+  websiteNotes: string;
   city: string;
+  area: string;
   businessType: string;
   leadSource: string;
   leadSourceOther: string;
+  listingLink: string;
+  notes: string;
 };
-type Errors = Partial<Record<keyof FormState, string>>;
+type TextField = Exclude<keyof FormState, 'phones'>;
+/** Each phone box has its own key: phone0 (main), phone1, phone2, ... */
+type PhoneKey = `phone${number}`;
+type ErrorKey = TextField | PhoneKey;
+type Errors = Partial<Record<ErrorKey, string>>;
+
+const phoneKey = (i: number): PhoneKey => `phone${i}`;
 
 const ADDED_BY_KEY = 'scalehour.addedBy';
 
@@ -56,31 +69,53 @@ function savedName() {
   }
 }
 
+/** Field order matches the form, top to bottom, so the first one with an error gets focus. */
 const emptyForm = (addedBy: string): FormState => ({
   addedBy,
   business: '',
   contactName: '',
   designation: '',
-  phone: '',
+  phones: [''],
   email: '',
+  socialLink: '',
   website: '',
+  websitePitch: '',
+  websiteNotes: '',
   city: '',
+  area: '',
   businessType: '',
   leadSource: '',
   leadSourceOther: '',
+  listingLink: '',
+  notes: '',
 });
 
-/** Fields top to bottom, so the first one with an error gets focus. */
-const FIELD_ORDER = Object.keys(emptyForm('')) as (keyof FormState)[];
+/** Fields top to bottom, with one entry per phone box. */
+function fieldOrder(f: FormState): ErrorKey[] {
+  return (Object.keys(f) as (keyof FormState)[]).flatMap((k) =>
+    k === 'phones' ? f.phones.map((_, i) => phoneKey(i)) : [k],
+  );
+}
 
 function validate(f: FormState): Errors {
   const e: Errors = {};
   if (!f.addedBy) e.addedBy = 'Select your name.';
   if (!f.business.trim()) e.business = 'Enter the business or company name.';
   if (!f.contactName.trim()) e.contactName = 'Enter the contact person’s name.';
-  if (!f.phone.trim()) e.phone = 'Enter the phone number.';
-  else if (!normalizePhone(f.phone)) e.phone = 'Enter a valid 10-digit mobile number, starting with 6, 7, 8 or 9.';
+  f.phones.forEach((raw, i) => {
+    const key = phoneKey(i);
+    if (i === 0) {
+      if (!raw.trim()) e[key] = 'Enter the phone number.';
+      else if (!normalizePhone(raw)) e[key] = 'Enter a valid 10-digit mobile number, starting with 6, 7, 8 or 9.';
+      return;
+    }
+    if (!raw.trim()) return; // An empty extra box is just skipped.
+    const digits = normalizeAnyPhone(raw);
+    if (!digits) e[key] = 'Enter a 10-digit mobile, or a landline with its STD code.';
+    else if (f.phones.slice(0, i).some((p) => normalizeAnyPhone(p) === digits)) e[key] = 'This number is already entered above.';
+  });
   if (f.email.trim() && !isValidEmail(f.email.trim())) e.email = 'Enter a valid email, like name@company.com.';
+  if (!f.websitePitch) e.websitePitch = 'Select whether we can pitch them a website.';
   if (!f.city.trim()) e.city = 'Enter the city.';
   if (!f.businessType) e.businessType = 'Select the business type.';
   if (!f.leadSource) e.leadSource = 'Select where this lead came from.';
@@ -98,15 +133,34 @@ function stillMatching(
 ): Duplicate[] {
   if (!result) return [];
   return result.duplicates
-    .map((d) => ({ ...d, matchedOn: d.matchedOn.filter((f) => current[f] && current[f] === result.lookup[f]) }))
+    .map((d) => {
+      const phones = (d.phones ?? []).filter((p) => current.phones.includes(p));
+      const matchedOn = d.matchedOn.filter((f) =>
+        f === 'phone' ? phones.length > 0 : current[f] && current[f] === result.lookup[f],
+      );
+      return { ...d, matchedOn, phones };
+    })
     .filter((d) => d.matchedOn.length > 0);
 }
 
-function duplicateErrors(duplicates: Duplicate[]): Errors {
+/** Puts the "already in the sheet" message under each field, and each phone box, that matched. */
+function duplicateErrors(duplicates: Duplicate[], phones: string[]): Errors {
   const e: Errors = {};
-  for (const d of duplicates) for (const f of d.matchedOn) e[f] = DUPLICATE_ERRORS[f];
+  for (const d of duplicates) {
+    for (const f of d.matchedOn) if (f !== 'phone') e[f] = DUPLICATE_ERRORS[f];
+    phones.forEach((raw, i) => {
+      const digits = normalizeAnyPhone(raw);
+      if (digits && d.phones?.includes(digits)) e[phoneKey(i)] = DUPLICATE_ERRORS.phone;
+    });
+  }
   return e;
 }
+
+const leadLookup = (lead: LeadInput) => duplicateLookup({ ...lead, phones: [lead.phone, ...lead.otherPhones] });
+
+/** "phone number 98765 43210" rather than just "phone number", since a lead can have several. */
+const matchLabel = (d: Duplicate, f: DuplicateField) =>
+  f === 'phone' && d.phones?.length ? `${DUPLICATE_LABELS.phone} ${d.phones.map(formatPhone).join(', ')}` : DUPLICATE_LABELS[f];
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -125,12 +179,19 @@ function toLead(f: FormState): LeadInput {
     business: f.business.trim(),
     contactName: f.contactName.trim(),
     designation: f.designation,
-    phone: normalizePhone(f.phone),
+    phone: normalizePhone(f.phones[0]),
+    otherPhones: f.phones.slice(1).map(normalizeAnyPhone).filter(Boolean),
     email: f.email.trim(),
     website: f.website.trim(),
+    websitePitch: f.websitePitch,
+    websiteNotes: f.websiteNotes.trim(),
     city: f.city.trim(),
+    area: f.area.trim(),
     businessType: f.businessType,
     leadSource: f.leadSource === 'Other' ? `Other: ${f.leadSourceOther.trim()}` : f.leadSource,
+    listingLink: f.listingLink.trim(),
+    socialLink: f.socialLink.trim(),
+    notes: f.notes.trim(),
   };
 }
 
@@ -158,7 +219,7 @@ export function LeadForm() {
     // saving, so two people adding the same lead at the same moment can't both succeed.
     mutationFn: async (lead: LeadInput) => {
       setStage('checking');
-      const found = await queryClient.fetchQuery(duplicateCheckQuery(duplicateLookup(lead)));
+      const found = await queryClient.fetchQuery(duplicateCheckQuery(leadLookup(lead)));
       if (found.duplicates.length) {
         throw new ApiError('duplicate', 'Already in the sheet.', found.duplicates);
       }
@@ -176,11 +237,12 @@ export function LeadForm() {
     },
     onError: (err, lead) => {
       if (err instanceof ApiError && err.code === 'duplicate' && err.duplicates?.length) {
-        const searched = duplicateLookup(lead);
+        const searched = leadLookup(lead);
         queryClient.setQueryData(duplicateCheckQuery(searched).queryKey, { lookup: searched, duplicates: err.duplicates });
-        const found = duplicateErrors(err.duplicates);
+        // The form is locked while saving, so it still holds what was sent.
+        const found = duplicateErrors(err.duplicates, form.phones);
         setErrors(found);
-        const first = FIELD_ORDER.find((k) => found[k]);
+        const first = fieldOrder(form).find((k) => found[k]);
         if (first) document.getElementById(first)?.focus();
       } else {
         setFailure(`${err.message} Your details are still here. Tap “Save lead” to try again.`);
@@ -194,10 +256,14 @@ export function LeadForm() {
     return () => clearTimeout(timer);
   }, [success]);
 
-  function update(key: keyof FormState, value: string) {
-    setForm((f) => ({ ...f, [key]: value }));
+  function clearError(key: ErrorKey) {
     setErrors(({ [key]: _, ...rest }) => rest);
     setSuccess('');
+  }
+
+  function update(key: TextField, value: string) {
+    setForm((f) => ({ ...f, [key]: value }));
+    clearError(key);
     if (key === 'addedBy') {
       try {
         localStorage.setItem(ADDED_BY_KEY, value);
@@ -207,14 +273,60 @@ export function LeadForm() {
     }
   }
 
-  function field(key: keyof FormState) {
+  function updatePhone(i: number, value: string) {
+    setForm((f) => ({ ...f, phones: f.phones.map((p, j) => (j === i ? value : p)) }));
+    clearError(phoneKey(i));
+  }
+
+  function addPhone() {
+    const i = form.phones.length;
+    setForm((f) => ({ ...f, phones: [...f.phones, ''] }));
+    requestAnimationFrame(() => document.getElementById(phoneKey(i))?.focus());
+  }
+
+  function removePhone(i: number) {
+    setForm((f) => ({ ...f, phones: f.phones.filter((_, j) => j !== i) }));
+    // The boxes below move up and may no longer be wrong (e.g. "already entered above"),
+    // so their messages are cleared; saving checks them again.
+    setErrors((e) =>
+      Object.fromEntries(
+        Object.entries(e).filter(([key]) => {
+          const n = /^phone(\d+)$/.exec(key)?.[1];
+          return n === undefined || Number(n) < i;
+        }),
+      ),
+    );
+    requestAnimationFrame(() => document.getElementById(phoneKey(i - 1))?.focus());
+  }
+
+  function errorProps(key: ErrorKey) {
+    return {
+      'aria-invalid': errors[key] ? true : undefined,
+      'aria-describedby': errors[key] ? `${key}-error` : undefined,
+    };
+  }
+
+  function field(key: TextField) {
     return {
       id: key,
       name: key,
       value: form[key],
-      onChange: (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => update(key, e.target.value),
-      'aria-invalid': errors[key] ? true : undefined,
-      'aria-describedby': errors[key] ? `${key}-error` : undefined,
+      onChange: (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => update(key, e.target.value),
+      ...errorProps(key),
+    };
+  }
+
+  function phoneField(i: number) {
+    const key = phoneKey(i);
+    return {
+      id: key,
+      name: key,
+      value: form.phones[i],
+      onChange: (e: ChangeEvent<HTMLInputElement>) => updatePhone(i, e.target.value),
+      type: 'tel',
+      inputMode: 'tel' as const,
+      autoComplete: 'off',
+      ...errorProps(key),
     };
   }
 
@@ -225,10 +337,10 @@ export function LeadForm() {
     setFailure('');
 
     // A format problem wins over "already in the sheet" for the same field.
-    const found = { ...duplicateErrors(duplicates), ...validate(form) };
+    const found = { ...duplicateErrors(duplicates, form.phones), ...validate(form) };
     setErrors(found);
 
-    const firstInvalid = FIELD_ORDER.find((k) => found[k]);
+    const firstInvalid = fieldOrder(form).find((k) => found[k]);
     if (firstInvalid) {
       document.getElementById(firstInvalid)?.focus();
       return;
@@ -266,12 +378,40 @@ export function LeadForm() {
             </Field>
           </div>
 
-          <div className="row-2">
-            <Field id="phone" label="Phone number" required error={errors.phone} hint="10-digit mobile, +91 optional">
-              <input {...field('phone')} type="tel" inputMode="tel" autoComplete="off" placeholder="98765 43210" />
+          <div className="phones">
+            <Field id={phoneKey(0)} label="Phone number" required error={errors.phone0} hint="10-digit mobile, +91 optional">
+              <input {...phoneField(0)} placeholder="98765 43210" />
             </Field>
+
+            {form.phones.slice(1).map((_, j) => {
+              const i = j + 1;
+              return (
+                <Field key={i} id={phoneKey(i)} label={`Phone number ${i + 1}`} error={errors[phoneKey(i)]} hint="Mobile, or landline with STD code">
+                  <div className="input-action">
+                    <input {...phoneField(i)} placeholder="98765 43210 or 022 2345 6789" />
+                    <button type="button" className="icon-btn" onClick={() => removePhone(i)} aria-label={`Remove phone number ${i + 1}`}>
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+                        <path d="M6 6l12 12M18 6L6 18" />
+                      </svg>
+                    </button>
+                  </div>
+                </Field>
+              );
+            })}
+
+            {form.phones.length < CONFIG.MAX_PHONE_NUMBERS && (
+              <button type="button" className="btn-add" onClick={addPhone}>
+                + Add another number
+              </button>
+            )}
+          </div>
+
+          <div className="row-2">
             <Field id="email" label="Email" error={errors.email}>
               <input {...field('email')} type="email" inputMode="email" autoComplete="off" autoCapitalize="none" spellCheck={false} />
+            </Field>
+            <Field id="socialLink" label="Instagram / Facebook" error={errors.socialLink}>
+              <input {...field('socialLink')} type="text" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="instagram.com/…" />
             </Field>
           </div>
 
@@ -285,7 +425,7 @@ export function LeadForm() {
               <strong>Already in the sheet, so it won't be added again</strong>
               {duplicates.map((d) => (
                 <span key={d.leadId}>
-                  Same {d.matchedOn.map((f) => DUPLICATE_LABELS[f]).join(', ')} as {d.leadId}
+                  Same {d.matchedOn.map((f) => matchLabel(d, f)).join(', ')} as {d.leadId}
                   {d.business ? ` · ${d.business}` : ''}, added by {d.addedBy} on {d.dateAdded}
                 </span>
               ))}
@@ -296,8 +436,21 @@ export function LeadForm() {
             <Field id="website" label="Website" error={errors.website}>
               <input {...field('website')} type="text" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="example.com" />
             </Field>
+            <Field id="websitePitch" label="Pitch them a website?" required error={errors.websitePitch}>
+              <Select {...field('websitePitch')} placeholder="Select" options={WEBSITE_PITCH} />
+            </Field>
+          </div>
+
+          <Field id="websiteNotes" label="Website notes" error={errors.websiteNotes} hint="What to pitch, so the caller knows the angle">
+            <textarea {...field('websiteNotes')} rows={2} placeholder="e.g. Not mobile-friendly, no enquiry form, last updated 2019" />
+          </Field>
+
+          <div className="row-2">
             <Field id="city" label="City" required error={errors.city}>
               <input {...field('city')} type="text" autoComplete="off" autoCapitalize="words" />
+            </Field>
+            <Field id="area" label="Area / locality" error={errors.area}>
+              <input {...field('area')} type="text" autoComplete="off" autoCapitalize="words" placeholder="e.g. Andheri West" />
             </Field>
           </div>
 
@@ -315,6 +468,14 @@ export function LeadForm() {
               <input {...field('leadSourceOther')} type="text" autoComplete="off" placeholder="e.g. JustDial, walk-in" />
             </Field>
           )}
+
+          <Field id="listingLink" label="Listing / profile link" error={errors.listingLink} hint="Where you found them, so the caller can mention it">
+            <input {...field('listingLink')} type="text" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="99acres.com/…" />
+          </Field>
+
+          <Field id="notes" label="Notes for the caller" error={errors.notes}>
+            <textarea {...field('notes')} rows={3} placeholder="e.g. 3 ongoing projects in Thane, ask for Rahul, busy before 11 am" />
+          </Field>
         </fieldset>
 
         {save.isPending && (
