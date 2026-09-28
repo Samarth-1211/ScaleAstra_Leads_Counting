@@ -12,7 +12,7 @@ export const CONFIG = {
   /** Leads each person should add per day. */
   DAILY_TARGET: 71,
 
-  /** Team members. To add someone, add their name here; nothing else needs to change. */
+  /** Team members. To add someone,----------------------- add their name here; nothing else needs to change. */
   TEAM: ['Shakti', 'Parag'],
 
   /** How often the leaderboard refreshes by itself, in seconds. */
